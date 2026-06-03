@@ -285,21 +285,130 @@ def calcular_indicadores(candles: List[dict]) -> dict:
         "tendencia":   "alcista" if float(ema_50.iloc[-1]) > float(ema_200.iloc[-1]) else "bajista",
     }
 
-# ── Detección de patrón quiebre + retesteo ────────────────────────────────────
+# ── Detección de zonas con múltiples toques ──────────────────────────────────
+def detectar_zonas(candles: List[dict], tolerancia_pct: float = 0.002) -> List[dict]:
+    """
+    Detecta zonas de soporte/resistencia con múltiples toques.
+    El mentor dice: zona con varios toques = zona válida.
+    tolerancia_pct: 0.2% de tolerancia para agrupar toques.
+    """
+    if len(candles) < 10:
+        return []
+
+    zonas = []
+    highs = [c["high"] for c in candles]
+    lows  = [c["low"]  for c in candles]
+
+    # Detectar niveles con múltiples toques
+    todos_niveles = highs + lows
+
+    for nivel in todos_niveles:
+        tolerancia = nivel * tolerancia_pct
+        toques = sum(
+            1 for c in candles
+            if abs(c["high"] - nivel) < tolerancia or abs(c["low"] - nivel) < tolerancia
+        )
+        if toques >= 2:  # Mínimo 2 toques para ser zona válida
+            # Verificar si ya existe zona cercana
+            existe = any(abs(z["nivel"] - nivel) < tolerancia * 3 for z in zonas)
+            if not existe:
+                zonas.append({
+                    "nivel":  round(nivel, 4),
+                    "toques": toques,
+                    "tipo":   "resistencia" if nivel > candles[-1]["close"] else "soporte",
+                })
+
+    # Ordenar por número de toques (más toques = más fuerte)
+    return sorted(zonas, key=lambda z: z["toques"], reverse=True)[:10]
+
+def detectar_quiebre_contundente(candles: List[dict], zona_nivel: float) -> dict:
+    """
+    Detecta si hubo un quiebre contundente de una zona.
+    Regla del mentor: quiebre con CUERPO de vela, no mecha.
+    """
+    if len(candles) < 3:
+        return {"quiebre": False, "direccion": None}
+
+    tolerancia = zona_nivel * 0.002
+
+    # Revisar las últimas 5 velas
+    for i in range(-5, 0):
+        vela = candles[i]
+        cuerpo_alto = max(vela["open"], vela["close"])
+        cuerpo_bajo = min(vela["open"], vela["close"])
+        tamaño_cuerpo = abs(vela["close"] - vela["open"])
+        tamaño_total  = vela["high"] - vela["low"]
+
+        # El cuerpo debe ser al menos 50% de la vela total
+        if tamaño_total == 0:
+            continue
+        ratio_cuerpo = tamaño_cuerpo / tamaño_total
+
+        if ratio_cuerpo < 0.5:
+            continue  # Es mecha, no cuerpo — no cuenta como quiebre
+
+        # Quiebre bajista: cuerpo cierra por debajo de la zona
+        if cuerpo_bajo < zona_nivel - tolerancia and vela["close"] < zona_nivel:
+            return {
+                "quiebre":   True,
+                "direccion": "SELL",
+                "vela_idx":  i,
+                "precio_quiebre": vela["close"],
+            }
+
+        # Quiebre alcista: cuerpo cierra por encima de la zona
+        if cuerpo_alto > zona_nivel + tolerancia and vela["close"] > zona_nivel:
+            return {
+                "quiebre":   True,
+                "direccion": "BUY",
+                "vela_idx":  i,
+                "precio_quiebre": vela["close"],
+            }
+
+    return {"quiebre": False, "direccion": None}
+
+def detectar_retesteo(candles: List[dict], zona_nivel: float, direccion: str) -> bool:
+    """
+    Detecta si el precio está retestando la zona quebrada.
+    Regla del mentor: entras DURANTE el retesteo, no después.
+    """
+    if len(candles) < 2:
+        return False
+
+    tolerancia  = zona_nivel * 0.003
+    precio_actual = candles[-1]["close"]
+    precio_anterior = candles[-2]["close"]
+
+    # El precio debe estar cerca de la zona
+    dist_zona = abs(precio_actual - zona_nivel)
+
+    if dist_zona > tolerancia * 3:
+        return False
+
+    # Para SELL: precio subió hasta la zona (retesteo de resistencia creada)
+    if direccion == "SELL":
+        return precio_actual >= zona_nivel - tolerancia and precio_anterior < precio_actual
+
+    # Para BUY: precio bajó hasta la zona (retesteo de soporte creado)
+    if direccion == "BUY":
+        return precio_actual <= zona_nivel + tolerancia and precio_anterior > precio_actual
+
+    return False
+
+# ── Detección de patrón quiebre + retesteo (versión mejorada) ─────────────────
 def detectar_patron_quiebre_retesteo(
     candles_h4: List[dict],
     candles_diario: List[dict],
 ) -> dict:
     """
-    Detecta el patrón principal del mentor:
-    1. Precio rompe zona de soporte/resistencia
-    2. Retestea la zona
-    3. La convierte en lo contrario (soporte→resistencia o viceversa)
-    4. Hay rechazo → señal de entrada
-
-    Retorna: accion, confianza, motivo
+    Estrategia exacta del mentor Joel:
+    1. Zona con múltiples toques (soporte/resistencia válida)
+    2. Quiebre contundente con CUERPO de vela (no mecha)
+    3. Retesteo de la zona quebrada
+    4. Entrada durante el retesteo
+    5. Solo H4 y Diario
     """
-    if len(candles_h4) < 20 or len(candles_diario) < 10:
+    if len(candles_h4) < 30 or len(candles_diario) < 10:
         return {"accion": "HOLD", "confianza": 0.0, "motivo": "Datos insuficientes"}
 
     ind_h4     = calcular_indicadores(candles_h4)
@@ -308,70 +417,102 @@ def detectar_patron_quiebre_retesteo(
     if not ind_h4 or not ind_diario:
         return {"accion": "HOLD", "confianza": 0.0, "motivo": "Indicadores insuficientes"}
 
-    precio_actual = ind_h4.get("precio", 0)
-    estructura_h4 = ind_h4.get("estructura", "lateral")
-    estructura_d  = ind_diario.get("estructura", "lateral")
-    tendencia_h4  = ind_h4.get("tendencia", "bajista")
-    tendencia_d   = ind_diario.get("tendencia", "bajista")
-    soporte_h4    = ind_h4.get("soporte", 0)
-    resistencia_h4 = ind_h4.get("resistencia", 0)
-    rsi_h4        = ind_h4.get("rsi", 50)
-    atr_h4        = ind_h4.get("atr", 0)
+    precio_actual  = candles_h4[-1]["close"]
+    estructura_d   = ind_diario.get("estructura", "lateral")
+    tendencia_h4   = ind_h4.get("tendencia", "bajista")
+    tendencia_d    = ind_diario.get("tendencia", "bajista")
+    rsi_h4         = ind_h4.get("rsi", 50) or 50
 
     score   = 0
     motivos = []
+    accion  = "HOLD"
 
-    # ── Filtro 1: Tendencia alineada en diario y H4 ───────────────────────────
-    if estructura_d == estructura_h4 and estructura_d != "lateral":
-        score += 3
-        motivos.append(f"Estructura {estructura_d} alineada D+H4")
-    elif estructura_d != "lateral":
-        score += 1
-        motivos.append(f"Estructura diaria: {estructura_d}")
+    # ── Paso 1: Detectar zonas válidas en H4 ─────────────────────────────────
+    zonas_h4 = detectar_zonas(candles_h4)
+    zonas_d  = detectar_zonas(candles_diario)
 
-    # ── Filtro 2: EMAs alineadas ──────────────────────────────────────────────
-    if tendencia_h4 == tendencia_d:
-        score += 2
-        motivos.append(f"Tendencia EMAs alineada: {tendencia_h4}")
+    if not zonas_h4:
+        return {"accion": "HOLD", "confianza": 0.0, "motivo": "Sin zonas válidas en H4"}
 
-    # ── Filtro 3: Precio cerca de zona clave ──────────────────────────────────
-    if atr_h4 and soporte_h4 and resistencia_h4:
-        dist_soporte     = abs(precio_actual - soporte_h4)
-        dist_resistencia = abs(precio_actual - resistencia_h4)
+    # ── Paso 2: Buscar quiebre + retesteo en las zonas más fuertes ───────────
+    señal_encontrada = False
 
-        if dist_soporte < atr_h4 * 0.5:
+    for zona in zonas_h4[:5]:  # Revisar las 5 zonas más fuertes
+        nivel  = zona["nivel"]
+        toques = zona["toques"]
+
+        # Quiebre contundente con cuerpo de vela
+        quiebre = detectar_quiebre_contundente(candles_h4, nivel)
+
+        if not quiebre["quiebre"]:
+            continue
+
+        direccion = quiebre["direccion"]
+
+        # Retesteo de la zona
+        en_retesteo = detectar_retesteo(candles_h4, nivel, direccion)
+
+        if not en_retesteo:
+            continue
+
+        # ── Confirmaciones adicionales ────────────────────────────────────
+        score = 0
+
+        # Zona fuerte (más toques = más puntos)
+        if toques >= 3:
+            score += 3
+            motivos.append(f"Zona fuerte con {toques} toques en H4")
+        elif toques >= 2:
             score += 2
-            motivos.append(f"Precio cerca de soporte H4 ({soporte_h4:.4f})")
-        if dist_resistencia < atr_h4 * 0.5:
+            motivos.append(f"Zona con {toques} toques en H4")
+
+        # Tendencia alineada
+        if tendencia_h4 == tendencia_d:
             score += 2
-            motivos.append(f"Precio cerca de resistencia H4 ({resistencia_h4:.4f})")
+            motivos.append(f"Tendencia alineada H4+D: {tendencia_h4}")
 
-    # ── Filtro 4: RSI confirma ────────────────────────────────────────────────
-    if rsi_h4 and rsi_h4 < 35:
-        score += 2
-        motivos.append(f"RSI sobrevendido ({rsi_h4:.1f}) — zona de compra")
-    elif rsi_h4 and rsi_h4 > 65:
-        score += 2
-        motivos.append(f"RSI sobrecomprado ({rsi_h4:.1f}) — zona de venta")
+        # Estructura diaria confirma
+        if (direccion == "BUY" and estructura_d == "alcista") or            (direccion == "SELL" and estructura_d == "bajista"):
+            score += 2
+            motivos.append(f"Estructura diaria confirma: {estructura_d}")
 
-    # ── Decisión ──────────────────────────────────────────────────────────────
-    confianza = round(min(1.0, score / 9.0), 2)
+        # RSI confirma
+        if direccion == "BUY" and rsi_h4 < 45:
+            score += 1
+            motivos.append(f"RSI bajo ({rsi_h4:.0f}) — confirma compra")
+        elif direccion == "SELL" and rsi_h4 > 55:
+            score += 1
+            motivos.append(f"RSI alto ({rsi_h4:.0f}) — confirma venta")
 
-    if score >= 6:
-        # Determinar dirección
-        if estructura_d == "alcista" or (rsi_h4 and rsi_h4 < 35):
-            accion = "BUY"
-        elif estructura_d == "bajista" or (rsi_h4 and rsi_h4 > 65):
-            accion = "SELL"
-        else:
-            accion = "HOLD"
-    else:
-        accion = "HOLD"
+        # Zona también existe en diario (más fuerte)
+        zona_en_diario = any(
+            abs(z["nivel"] - nivel) < nivel * 0.005
+            for z in zonas_d
+        )
+        if zona_en_diario:
+            score += 2
+            motivos.append("Zona confirmada también en Diario")
+
+        if score >= 5:
+            accion = direccion
+            señal_encontrada = True
+            motivos.insert(0, f"✅ Quiebre+Retesteo @ {nivel:.4f}")
+            break
+
+    if not señal_encontrada:
+        return {
+            "accion":    "HOLD",
+            "confianza": 0.0,
+            "motivo":    "Sin patrón quiebre+retesteo válido",
+            "score":     0,
+        }
+
+    confianza = round(min(1.0, score / 10.0), 2)
 
     return {
         "accion":    accion,
         "confianza": confianza,
-        "motivo":    " | ".join(motivos) if motivos else "Sin señal clara",
+        "motivo":    " | ".join(motivos),
         "score":     score,
     }
 
