@@ -42,7 +42,7 @@ DB_NAME           = os.environ.get("DB_NAME", "deriv_bot")
 DERIV_TOKEN       = os.environ.get("DERIV_TOKEN", "")
 TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT     = os.environ.get("TELEGRAM_CHAT_ID", "")
-DERIV_WS_URL      = "wss://ws.derivws.com/websockets/v3?app_id=1089"
+DERIV_WS_URL      = "wss://ws.derivws.com/websockets/v3?app_id=33saE271L1HzMA0KDUl5y"
 
 # ── Pares disponibles ─────────────────────────────────────────────────────────
 PAIRS = {
