@@ -768,8 +768,11 @@ async def ejecutar_tick() -> dict:
     simbolo    = par_config["symbol"]
 
     # Obtener velas
+    logger.info("📊 Obteniendo velas para %s...", simbolo)
     velas_diario = await get_candles(simbolo, 86400, 100)   # Diario
     velas_h4     = await get_candles(simbolo, 14400, 200)   # H4
+
+    logger.info("📊 Velas obtenidas — Diario: %d | H4: %d", len(velas_diario), len(velas_h4))
 
     if not velas_diario or not velas_h4:
         logger.warning("No se pudieron obtener velas para %s", simbolo)
@@ -778,6 +781,7 @@ async def ejecutar_tick() -> dict:
     # Analizar patrón
     senal = detectar_patron_quiebre_retesteo(velas_h4, velas_diario)
     precio = velas_h4[-1]["close"] if velas_h4 else 0
+    logger.info("📈 Señal: %s | Confianza: %.0f%% | %s", senal["accion"], senal["confianza"]*100, senal["motivo"][:80])
 
     # Evitar señales duplicadas — solo guardar si es diferente a la última
     ultima = await db.senales.find_one(
