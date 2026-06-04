@@ -72,7 +72,7 @@ def today_utc() -> str:
 class Settings(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str = "singleton"
-    pair: str = "step_index"
+    pair: str = "volatility_75"
     capital_total: float = 1000.0       # Capital total guardado en banco
     bala_pct: float = 5.0               # % del capital por bala (5%)
     objetivo_multiplicador: float = 20.0 # Objetivo: 20x la bala
@@ -123,31 +123,23 @@ class Senal(BaseModel):
     creada_en: str = Field(default_factory=now_iso)
 
 # ── Deriv WebSocket ───────────────────────────────────────────────────────────
-async def deriv_request(request: dict) -> dict:
-    """Envía una petición a la API de Deriv via WebSocket."""
+async def deriv_request_public(request: dict) -> dict:
+    """Envía una petición PÚBLICA a la API de Deriv via WebSocket (sin autenticación)."""
     try:
         async with websockets.connect(DERIV_WS_URL, ping_timeout=30) as ws:
-            # Autenticar
-            if DERIV_TOKEN:
-                await ws.send(json.dumps({"authorize": DERIV_TOKEN}))
-                auth_resp = json.loads(await ws.recv())
-                if auth_resp.get("error"):
-                    logger.warning("Error auth Deriv: %s", auth_resp["error"])
-
-            # Enviar petición
             await ws.send(json.dumps(request))
             response = json.loads(await ws.recv())
             return response
     except Exception as exc:
-        logger.warning("Error Deriv WS: %s", exc)
+        logger.warning("Error Deriv WS público: %s", exc)
         return {"error": str(exc)}
 
 async def get_candles(symbol: str, granularity: int, count: int = 250) -> List[dict]:
     """
-    Obtiene velas históricas de Deriv.
+    Obtiene velas históricas de Deriv SIN autenticación.
     granularity: 86400=diario, 14400=H4, 3600=H1, 300=M5, 60=M1
     """
-    resp = await deriv_request({
+    resp = await deriv_request_public({
         "ticks_history": symbol,
         "adjust_start_time": 1,
         "count": count,
@@ -172,8 +164,8 @@ async def get_candles(symbol: str, granularity: int, count: int = 250) -> List[d
     return candles
 
 async def get_current_price(symbol: str) -> float:
-    """Obtiene el precio actual de un par."""
-    resp = await deriv_request({"ticks": symbol, "subscribe": 0})
+    """Obtiene el precio actual de un par sin autenticación."""
+    resp = await deriv_request_public({"ticks": symbol})
     if "tick" in resp:
         return float(resp["tick"]["quote"])
     return 0.0
@@ -787,17 +779,39 @@ async def ejecutar_tick() -> dict:
     senal = detectar_patron_quiebre_retesteo(velas_h4, velas_diario)
     precio = velas_h4[-1]["close"] if velas_h4 else 0
 
-    # Guardar señal
-    s = Senal(
-        par=settings.pair,
-        temporalidad="H4+D",
-        accion=senal["accion"],
-        confianza=senal["confianza"],
-        precio=precio,
-        motivo=senal["motivo"],
-        indicadores=calcular_indicadores(velas_h4),
+    # Evitar señales duplicadas — solo guardar si es diferente a la última
+    ultima = await db.senales.find_one(
+        {"par": settings.pair},
+        {"_id": 0},
+        sort=[("creada_en", -1)]
     )
-    await db.senales.insert_one(s.model_dump())
+    es_duplicada = (
+        ultima and
+        ultima.get("accion") == senal["accion"] and
+        ultima.get("motivo") == senal["motivo"]
+    )
+
+    if not es_duplicada:
+        s = Senal(
+            par=settings.pair,
+            temporalidad="H4+D",
+            accion=senal["accion"],
+            confianza=senal["confianza"],
+            precio=precio,
+            motivo=senal["motivo"],
+            indicadores=calcular_indicadores(velas_h4),
+        )
+        await db.senales.insert_one(s.model_dump())
+    else:
+        s = Senal(
+            par=settings.pair,
+            temporalidad="H4+D",
+            accion=senal["accion"],
+            confianza=senal["confianza"],
+            precio=precio,
+            motivo=senal["motivo"],
+            indicadores=calcular_indicadores(velas_h4),
+        )
 
     resultado = {"senal": senal, "precio": precio}
 
