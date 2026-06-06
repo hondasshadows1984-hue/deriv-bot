@@ -80,6 +80,7 @@ class Settings(BaseModel):
     grid_size: float = 1.0              # Distancia entre operaciones grid
     max_grid_operaciones: int = 5       # Máximo operaciones en grid
     tick_interval_seconds: int = 300    # Cada cuánto analiza
+    min_confianza: float = 0.50         # Confianza mínima para operar
 
 class BotState(BaseModel):
     id: str = "singleton"
@@ -822,7 +823,7 @@ async def ejecutar_tick() -> dict:
     # Abrir operación si hay señal
     if (
         senal["accion"] in ("BUY", "SELL")
-        and senal["confianza"] >= 0.65
+        and senal["confianza"] >= settings.min_confianza
         and state.operaciones_hoy < settings.max_operaciones_dia
     ):
         bala   = await calcular_bala(settings)
